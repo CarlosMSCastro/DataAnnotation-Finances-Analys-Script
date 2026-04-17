@@ -1,19 +1,29 @@
 # DataAnnotation Analytics Dashboard
 
-A Tampermonkey userscript that injects a financial analytics panel into the DataAnnotation payments page, giving you stats that the platform doesn't show.
+A Tampermonkey userscript that injects an analytics button into the DataAnnotation payments page, giving you financial stats the platform doesn't show.
 
 ## Features
 
-Automatically navigates to Funds History, clicks "Include paid", and expands all entries before parsing. The panel shows:
+Click the 📊 Analytics button in the navbar to open the dashboard. The script automatically navigates to Funds History, enables "Include paid", and expands all entries before parsing.
 
-- Monthly earnings, hours logged, and hourly rate
+The dashboard shows:
+
+**Global totals**
+- Total historical earnings
+- Paid out to PayPal
+- Available to withdraw (Transferrable)
+- Pending approval
+
+**Per month (with month selector)**
+- Total earnings
 - Days worked vs days missed
+- Hours logged and hourly rate
 - Best earning day
-- Earnings by project (grouped and cleaned up)
-- Last week summary
-- Global totals with paid vs pending breakdown
-- USD/EUR toggle with live exchange rate (frankfurter.app)
-- Collapse button to fold everything back
+- Projects breakdown with tasks, hours, and hourly rate per project
+
+**Other**
+- USD/EUR toggle with live exchange rate
+- Collapse button to fold everything back in the page
 
 ## Installation
 
@@ -22,14 +32,16 @@ Automatically navigates to Funds History, clicks "Include paid", and expands all
 3. Delete the default content and paste the contents of `da-analytics.user.js`
 4. Save with `Ctrl+S`
 5. Go to `https://app.dataannotation.tech/workers/payments`
+6. Click **📊 Analytics** in the navbar
 
-The panel will appear in the top-right corner and load automatically.
+The script only runs on the payments page and never interferes with tasks or other areas of the site.
+
 
 ![DA Analytics Dashboard](screenshot.png)
 
 
 ## Notes
 
-The script reads data directly from the DOM, so it only works when the page is fully loaded. If totals look off, use the collapse button and let it re-expand everything.
+Projects are grouped by name — Kernel, Achilles, Styx, Thalia, Metis, Andesite, Pegasus, Argon all aggregate automatically. Surveys, qualifications, training tasks, and onboarding are grouped under "DataAnnotation Survey".
 
-Projects are grouped by name (Kernel, Achilles, Styx, Thalia, Metis, Andesite, Pegasus). Surveys, qualifications, training tasks, and onboarding steps are grouped under "DataAnnotation Survey".
+The hourly rate only counts logged time entries. Projects like Rate & Review that don't log time will show no hourly rate.
