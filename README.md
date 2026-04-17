@@ -37,7 +37,7 @@ The dashboard shows:
 The script only runs on the payments page and never interferes with tasks or other areas of the site.
 
 
-![DA Analytics Dashboard](screenshot.png)
+![DA Analytics Dashboard](screenshot.jpg)
 
 
 ## Notes
