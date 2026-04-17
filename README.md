@@ -25,13 +25,8 @@ Automatically navigates to Funds History, clicks "Include paid", and expands all
 
 The panel will appear in the top-right corner and load automatically.
 
-## Screenshot
-
-To add a screenshot, take one of the panel on the payments page, save it as `screenshot.png` in the repo root, and add this line to the README:
-
-```
 ![DA Analytics Dashboard](screenshot.png)
-```
+
 
 ## Notes
 
