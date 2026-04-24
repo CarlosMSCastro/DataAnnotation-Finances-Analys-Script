@@ -1,13 +1,16 @@
 // ==UserScript==
 // @name         DataAnnotation - Analytics Dashboard
 // @namespace    http://tampermonkey.net/
-// @version      4.0
+// @version      5.1
 // @description  Dashboard de analytics financeiro para DataAnnotation
 // @match        https://app.dataannotation.tech/workers/payments*
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_xmlhttpRequest
 // @connect      api.frankfurter.app
+// @connect      frankfurter.app
+// @connect      frankfurter.dev
+// @connect      api.frankfurter.dev
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -16,43 +19,104 @@
 
     const BLUE = '#005dcc';
     let eurRate = null;
-    let useEur = GM_getValue('useEur', false);
     let selectedMonth = null;
     let cachedDays = [];
 
-    // ── Taxa EUR ───────────────────────────────────────────────────────────────
+    function getPayments() {
+        try { return JSON.parse(GM_getValue('payments', '[]')); } catch(e) { return []; }
+    }
+    function savePayments(payments) {
+        GM_setValue('payments', JSON.stringify(payments));
+    }
+
+    const KNOWN_PAYMENTS = [
+        { date: '2026-04-01', usd: 15.00,   eur: 12.58,  rate: 0.8387, manual: true },
+        { date: '2026-04-06', usd: 36.00,   eur: 30.23,  rate: 0.8398, manual: true },
+        { date: '2026-04-09', usd: 142.44,  eur: 117.86, rate: 0.8274, manual: true },
+        { date: '2026-04-12', usd: 124.03,  eur: 102.48, rate: 0.8262, manual: true },
+        { date: '2026-04-15', usd: 395.69,  eur: 324.94, rate: 0.8212, manual: true },
+        { date: '2026-04-18', usd: 361.79,  eur: 297.63, rate: 0.8227, manual: true },
+    ];
+
+    function initPayments() {
+        const existing = getPayments();
+        if (existing.length === 0) {
+            savePayments(KNOWN_PAYMENTS);
+        } else {
+            let changed = false;
+            for (const kp of KNOWN_PAYMENTS) {
+                if (!existing.find(p => p.date === kp.date && p.usd === kp.usd)) {
+                    existing.push(kp);
+                    changed = true;
+                }
+            }
+            if (changed) savePayments(existing.sort((a,b) => a.date.localeCompare(b.date)));
+        }
+    }
+
     function fetchEurRate() {
         return new Promise((resolve) => {
             GM_xmlhttpRequest({
                 method: 'GET',
                 url: 'https://api.frankfurter.app/latest?from=USD&to=EUR',
+                headers: { 'Accept': 'application/json' },
                 onload: (res) => {
                     try { eurRate = JSON.parse(res.responseText).rates.EUR; }
-                    catch(e) { eurRate = 0.92; }
+                    catch(e) { eurRate = 0.8545; }
                     resolve();
                 },
-                onerror: () => { eurRate = 0.92; resolve(); }
+                onerror: () => { eurRate = 0.8545; resolve(); },
+                ontimeout: () => { eurRate = 0.8545; resolve(); }
+            });
+        });
+    }
+
+    function fetchRateForDate(dateStr) {
+        return new Promise((resolve) => {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: `https://api.frankfurter.app/${dateStr}?from=USD&to=EUR`,
+                headers: { 'Accept': 'application/json' },
+                onload: (res) => {
+                    try { resolve(JSON.parse(res.responseText).rates.EUR || null); }
+                    catch(e) { resolve(null); }
+                },
+                onerror: () => resolve(null),
+                ontimeout: () => resolve(null)
             });
         });
     }
 
     function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-    // ── Aguarda rows no DOM ────────────────────────────────────────────────────
     function waitForRows(callback, tries = 0) {
         const rows = document.querySelectorAll('[data-testid="cell-title"]');
         if (rows.length > 0) callback();
         else if (tries < 30) setTimeout(() => waitForRows(callback, tries + 1), 500);
     }
 
-    // ── Auto-click "Include paid" ──────────────────────────────────────────────
     function clickIncludePaid() {
         const btn = Array.from(document.querySelectorAll('button'))
             .find(b => b.textContent.trim() === 'Include paid');
         if (btn) btn.click();
     }
 
-    // ── Expand todos os níveis ─────────────────────────────────────────────────
+    async function setPerPage500(tries = 0) {
+        const current = Array.from(document.querySelectorAll('a')).find(a => a.textContent.trim() === '20');
+        if (!current) return;
+        current.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+        await sleep(500);
+        const btn500 = Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === '500');
+        if (btn500) {
+            btn500.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+            await sleep(1000);
+            const stillOn20 = Array.from(document.querySelectorAll('a')).find(a => a.textContent.trim() === '20');
+            if (stillOn20 && tries < 3) await setPerPage500(tries + 1);
+        } else if (tries < 3) {
+            await setPerPage500(tries + 1);
+        }
+    }
+
     async function expandAll(statusEl) {
         const dateRegex = /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d+$/;
         statusEl.textContent = '⏳ A expandir dias...';
@@ -68,7 +132,6 @@
         statusEl.textContent = '⏳ A calcular...';
     }
 
-    // ── Parser ─────────────────────────────────────────────────────────────────
     function parseData() {
         const dateRegex = /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d+$/;
         const monthMap = { Jan:0,Feb:1,Mar:2,Apr:3,May:4,Jun:5,Jul:6,Aug:7,Sep:8,Oct:9,Nov:10,Dec:11 };
@@ -113,12 +176,17 @@
         return days;
     }
 
-    // ── Stats ──────────────────────────────────────────────────────────────────
     function calcGlobal(days) {
+        // lê total histórico diretamente do DOM (mais preciso que somar headers)
         let grandTotal = 0;
-        for (const day of days) grandTotal += day.total;
+        const totalEl = Array.from(document.querySelectorAll('div.tw-text-4xl'))
+            .find(el => el.textContent.includes('$'));
+        if (totalEl) {
+            grandTotal = parseFloat(totalEl.textContent.replace(/[^0-9.]/g, '')) || 0;
+        } else {
+            for (const day of days) grandTotal += day.total;
+        }
 
-        // lê paid/pending/transferrable diretamente do DOM (mais preciso)
         let paid = 0, pending = 0, transferrable = 0;
         document.querySelectorAll('[data-testid="cell-amount"]').forEach(el => {
             const t = el.textContent.trim();
@@ -127,7 +195,6 @@
             if (amt > 0 && t.includes('Pending')) pending += amt;
             if (amt > 0 && t.includes('Transferrable')) transferrable += amt;
         });
-
         return { grandTotal, paid, pending, transferrable };
     }
 
@@ -151,7 +218,7 @@
         const isCurrent = yearN === now.getFullYear() && monthN === now.getMonth();
         const totalDays = isCurrent ? now.getDate() : new Date(yearN, monthN + 1, 0).getDate();
         const workedDays = filtered.filter(d => d.total > 0).length;
-        return { total, minutes, days: totalDays, workedDays, zeroDays: totalDays - workedDays, bestDay, bestAmount, projects };
+        return { total, minutes, days: totalDays, workedDays, bestDay, bestAmount, projects };
     }
 
     function getMonths(days) {
@@ -163,7 +230,6 @@
         return result;
     }
 
-    // ── projKey ────────────────────────────────────────────────────────────────
     const KNOWN_PROJECTS = ['Kernel', 'Achilles', 'Styx', 'Thalia', 'Metis', 'Andesite', 'Pegasus', 'Argon'];
     const SURVEY_REGEX = /^\[Survey\]|^\[SURVEY\]|^\[QUALIFICATION\]|^\[Qualification\]|^\[TRAINING\]|^\[💰 PAID TRAINING\]|^Onboarding|^Additional Projects|^Write LONG/i;
 
@@ -184,11 +250,7 @@
         return t.replace(/\s*[:]\s*$/, '').trim() || title;
     }
 
-    // ── Formatters ─────────────────────────────────────────────────────────────
-    function fmt(v) {
-        if (useEur && eurRate) return '€' + (v * eurRate).toFixed(2);
-        return '$' + v.toFixed(2);
-    }
+    function fmt(v) { return '$' + v.toFixed(2); }
     function fmtH(m) {
         if (!m) return '—';
         const h = Math.floor(m/60), min = m%60;
@@ -196,24 +258,14 @@
     }
     function fmtRate(total, minutes) {
         if (!minutes) return '—';
-        const sym = useEur && eurRate ? '€' : '$';
-        const val = useEur && eurRate ? (total * eurRate) / (minutes/60) : total / (minutes/60);
-        return sym + val.toFixed(2) + '/h';
+        return '$' + (total / (minutes/60)).toFixed(2) + '/h';
     }
 
     const MONTH_NAMES = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
 
-    // ── Modal helpers ──────────────────────────────────────────────────────────
-    function openModal() {
-        const m = document.getElementById('da-modal');
-        if (m) m.style.display = 'flex';
-    }
-    function closeModal() {
-        const m = document.getElementById('da-modal');
-        if (m) m.style.display = 'none';
-    }
+    function openModal() { const m = document.getElementById('da-modal'); if (m) m.style.display = 'flex'; }
+    function closeModal() { const m = document.getElementById('da-modal'); if (m) m.style.display = 'none'; }
 
-    // ── Injeta botão na navbar ─────────────────────────────────────────────────
     function injectNavButton(tries = 0) {
         if (document.getElementById('da-nav-btn')) return;
         const navList = document.querySelector('.navbar-collapse ul.navbar-nav');
@@ -221,24 +273,15 @@
             if (tries < 30) setTimeout(() => injectNavButton(tries + 1), 300);
             return;
         }
-        const onPayments = location.href.includes('/workers/payments');
         const li = document.createElement('li');
-        li.innerHTML = `<a id="da-nav-btn" title="${onPayments ? '' : 'Vai para Transfer Funds para usar o Analytics'}"
-            style="color:#fff;font-weight:600;font-size:14px;
-            padding:8px 16px;display:block;text-decoration:none;
-            opacity:${onPayments ? '0.9' : '0.5'};white-space:nowrap;
-            cursor:${onPayments ? 'pointer' : 'not-allowed'};">
+        li.innerHTML = `<a id="da-nav-btn" style="color:#fff;font-weight:600;font-size:14px;
+            padding:8px 16px;display:block;text-decoration:none;opacity:0.9;white-space:nowrap;cursor:pointer;">
             📊 Analytics
         </a>`;
         navList.appendChild(li);
-        const btn = document.getElementById('da-nav-btn');
-        btn.addEventListener('click', (e) => {
-            if (!location.href.includes('/workers/payments')) return;
-            init();
-        });
+        document.getElementById('da-nav-btn').addEventListener('click', init);
     }
 
-    // ── Render ─────────────────────────────────────────────────────────────────
     function render(days, loading = false) {
         cachedDays = days;
         const old = document.getElementById('da-modal');
@@ -247,6 +290,8 @@
         const global = calcGlobal(days);
         const months = getMonths(days);
         if (!selectedMonth && months.length > 0) selectedMonth = months[0].key;
+        const payments = getPayments().sort((a,b) => b.date.localeCompare(a.date));
+        const totalEurWise = payments.reduce((s, p) => s + p.eur, 0);
 
         function row(label, value, vstyle='color:#111827') {
             return `<div style="display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px solid #f3f4f6;">
@@ -254,9 +299,11 @@
                 <span style="font-weight:600;font-size:14px;${vstyle}">${value}</span>
             </div>`;
         }
-        function section(title) {
-            return `<div style="color:${BLUE};font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;
-                margin:20px 0 4px;padding-bottom:6px;border-bottom:2px solid ${BLUE};">${title}</div>`;
+        function section(title, extra='') {
+            return `<div style="display:flex;justify-content:space-between;align-items:center;color:${BLUE};font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;
+                margin:20px 0 4px;padding-bottom:6px;border-bottom:2px solid ${BLUE};">
+                <span>${title}</span>${extra}
+            </div>`;
         }
 
         const monthBtns = months.map(m => {
@@ -290,17 +337,44 @@
 
             monthContent = `
                 ${section(MONTH_NAMES[mo])}
-                ${row('Total', fmt(ms.total), `color:${BLUE};font-size:20px;font-weight:800;`)}
+                ${row('Total', '$' + ms.total.toFixed(2), `color:${BLUE};font-size:20px;font-weight:800;`)}
                 ${row('Dias trabalhados', `${ms.workedDays} / ${ms.days}`)}
                 ${row('Horas registadas', fmtH(ms.minutes))}
-                ${row(useEur ? '€/hora' : '$/hora', fmtRate(ms.total, ms.minutes))}
-                ${row('Dias com $0', ms.zeroDays, ms.zeroDays > 0 ? 'color:#ef4444' : 'color:#16a34a')}
-                ${ms.bestDay ? row('Melhor dia', `${ms.bestDay} (${fmt(ms.bestAmount)})`, 'color:#d97706') : ''}
+                ${row('$/hora', fmtRate(ms.total, ms.minutes))}
+                ${ms.bestDay ? row('Melhor dia', `${ms.bestDay} ($${ms.bestAmount.toFixed(2)})`, 'color:#d97706') : ''}
                 ${topProj.length > 0 ? `${section('Por projeto')}${projRows}` : ''}
             `;
         } else if (loading) {
             monthContent = `<div id="da-status" style="color:${BLUE};text-align:center;padding:30px 0;font-size:14px;">⏳ A carregar dados...</div>`;
         }
+
+        const paymentsRows = payments.map(p => `
+            <div style="display:grid;grid-template-columns:90px 70px 70px 70px 1fr;gap:4px;padding:7px 0;border-bottom:1px solid #f3f4f6;font-size:13px;align-items:center;">
+                <span style="color:#6b7280;">${p.date}</span>
+                <span style="color:#111827;font-weight:600;">$${p.usd.toFixed(2)}</span>
+                <span style="color:#16a34a;font-weight:600;">€${p.eur.toFixed(2)}</span>
+                <span style="color:#9ca3af;">${p.rate.toFixed(4)}</span>
+                <span style="color:${p.manual ? '#d97706' : '#2563eb'};font-size:11px;">${p.manual ? '✏️ manual' : '🤖 auto'}</span>
+            </div>`).join('');
+
+        const addPaymentForm = `
+            <div id="da-add-payment" style="background:#f8faff;border:1px solid #dbeafe;border-radius:8px;padding:12px;margin-top:12px;display:none;">
+                <div style="font-size:13px;font-weight:600;color:${BLUE};margin-bottom:8px;">Registar pagamento</div>
+                <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px;">
+                    <div><label style="font-size:11px;color:#6b7280;">Data</label><br>
+                        <input id="da-p-date" type="date" style="width:100%;border:1px solid #d1d5db;border-radius:4px;padding:4px;font-size:13px;box-sizing:border-box;"></div>
+                    <div><label style="font-size:11px;color:#6b7280;">USD (DA)</label><br>
+                        <input id="da-p-usd" type="number" placeholder="0.00" step="0.01" style="width:100%;border:1px solid #d1d5db;border-radius:4px;padding:4px;font-size:13px;box-sizing:border-box;"></div>
+                    <div><label style="font-size:11px;color:#6b7280;">EUR (Wise)</label><br>
+                        <input id="da-p-eur" type="number" placeholder="0.00" step="0.01" style="width:100%;border:1px solid #d1d5db;border-radius:4px;padding:4px;font-size:13px;box-sizing:border-box;"></div>
+                </div>
+                <div style="display:flex;gap:8px;">
+                    <button id="da-p-auto" style="flex:1;background:${BLUE};color:#fff;border:none;border-radius:6px;padding:6px;font-size:13px;cursor:pointer;">🤖 Buscar taxa auto</button>
+                    <button id="da-p-save" style="flex:1;background:#16a34a;color:#fff;border:none;border-radius:6px;padding:6px;font-size:13px;cursor:pointer;">💾 Guardar</button>
+                    <button id="da-p-cancel" style="background:#f3f4f6;color:#374151;border:none;border-radius:6px;padding:6px 10px;font-size:13px;cursor:pointer;">✕</button>
+                </div>
+                <div id="da-p-status" style="font-size:12px;color:#6b7280;margin-top:6px;"></div>
+            </div>`;
 
         const modal = document.createElement('div');
         modal.id = 'da-modal';
@@ -316,31 +390,36 @@
                 <div style="background:${BLUE};padding:16px 20px;display:flex;justify-content:space-between;align-items:center;flex-shrink:0;">
                     <span style="font-weight:700;font-size:16px;color:#fff;">📊 DA Analytics</span>
                     <div style="display:flex;gap:8px;align-items:center;">
-                        <button id="da-curr" style="background:rgba(255,255,255,0.15);color:#fff;border:1px solid rgba(255,255,255,0.3);
-                            border-radius:6px;padding:4px 12px;font-size:13px;cursor:pointer;font-weight:600;">
-                            ${useEur ? '🇺🇸 USD' : '🇪🇺 EUR'}
-                        </button>
                         <button id="da-collapse" style="background:rgba(255,255,255,0.15);color:#fff;border:1px solid rgba(255,255,255,0.3);
-                            border-radius:6px;padding:4px 12px;font-size:13px;cursor:pointer;">
-                            ⬆ Colapsar
-                        </button>
+                            border-radius:6px;padding:4px 12px;font-size:13px;cursor:pointer;">⬆ Colapsar</button>
                         <button id="da-close" style="background:rgba(255,255,255,0.15);color:#fff;border:none;
                             border-radius:6px;padding:4px 10px;font-size:18px;cursor:pointer;line-height:1;">✕</button>
                     </div>
                 </div>
                 <div style="overflow-y:auto;padding:0 24px 24px;flex:1;">
                     ${section('Totais globais')}
-                    ${row('Total histórico', fmt(global.grandTotal), `color:${BLUE};font-size:18px;font-weight:800;`)}
-                    ${row('Pago (PayPal)', fmt(global.paid), 'color:#16a34a')}
-                    ${row('Disponível p/ levantar', fmt(global.transferrable), 'color:#2563eb')}
-                    ${row('Pendente aprovação', fmt(global.pending), 'color:#d97706')}
+                    ${row('Total histórico', '$' + global.grandTotal.toFixed(2), `color:${BLUE};font-size:18px;font-weight:800;`)}
+                    ${row('Pago pelo DA', '$' + global.paid.toFixed(2), 'color:#16a34a')}
+                    ${row('Recebido na Wise', '€' + totalEurWise.toFixed(2), 'color:#16a34a')}
+                    ${eurRate ? row('Estimativa próx. levantamento', '~€' + (global.transferrable * eurRate * 0.9717).toFixed(2) + '<span style="color:#9ca3af;font-size:11px;font-weight:400;margin-left:6px;">±€8</span>', 'color:#2563eb') : ''}
+                    ${row('Disponível p/ levantar', '$' + global.transferrable.toFixed(2), 'color:#2563eb')}
+                    ${row('Pendente aprovação', '$' + global.pending.toFixed(2), 'color:#d97706')}
+
                     ${section('Mês')}
                     <div id="da-months" style="display:flex;flex-wrap:wrap;gap:6px;padding:8px 0;">
                         ${monthBtns}
                     </div>
                     <div id="da-month-content">${monthContent}</div>
+
+                    ${section('Pagamentos PayPal → Wise', '<button id="da-add-btn" style="background:' + BLUE + ';color:#fff;border:none;border-radius:4px;padding:2px 8px;font-size:11px;cursor:pointer;text-transform:none;letter-spacing:0;">+ Registar</button>')}
+                    <div style="display:grid;grid-template-columns:90px 70px 70px 70px 1fr;gap:4px;padding:5px 0;font-size:11px;color:#9ca3af;font-weight:600;">
+                        <span>Data</span><span>USD</span><span>EUR Wise</span><span>Taxa</span><span></span>
+                    </div>
+                    ${paymentsRows}
+                    ${addPaymentForm}
+
                     <div style="color:#d1d5db;font-size:11px;text-align:right;margin-top:16px;">
-                        ${eurRate && useEur ? `1 USD = €${eurRate.toFixed(4)} · ` : ''}Atualizado: ${new Date().toLocaleTimeString('pt-PT')}
+                        ${eurRate ? `taxa live: 1 USD = €${eurRate.toFixed(4)} · ` : ''}Atualizado: ${new Date().toLocaleTimeString('pt-PT')}
                     </div>
                 </div>
             </div>
@@ -349,12 +428,6 @@
 
         modal.addEventListener('click', (e) => { if (e.target === modal) closeModal(); });
         document.getElementById('da-close').addEventListener('click', closeModal);
-
-        document.getElementById('da-curr').addEventListener('click', () => {
-            useEur = !useEur;
-            GM_setValue('useEur', useEur);
-            render(cachedDays);
-        });
 
         document.getElementById('da-collapse').addEventListener('click', async (e) => {
             const btn = e.currentTarget;
@@ -383,24 +456,64 @@
             selectedMonth = btn.dataset.mkey;
             render(cachedDays);
         });
+
+        document.getElementById('da-add-btn').addEventListener('click', () => {
+            const form = document.getElementById('da-add-payment');
+            form.style.display = form.style.display === 'none' ? 'block' : 'none';
+            document.getElementById('da-p-date').value = new Date().toISOString().split('T')[0];
+        });
+
+        document.getElementById('da-p-cancel').addEventListener('click', () => {
+            document.getElementById('da-add-payment').style.display = 'none';
+        });
+
+        document.getElementById('da-p-auto').addEventListener('click', async () => {
+            const dateVal = document.getElementById('da-p-date').value;
+            const usdVal = parseFloat(document.getElementById('da-p-usd').value) || 0;
+            const status = document.getElementById('da-p-status');
+            if (!dateVal) { status.textContent = '⚠️ Introduz a data primeiro.'; return; }
+            status.textContent = '⏳ A buscar taxa...';
+            const rate = await fetchRateForDate(dateVal);
+            if (rate) {
+                if (usdVal > 0) {
+                    const estimated = (usdVal * rate * 0.9717).toFixed(2);
+                    document.getElementById('da-p-eur').value = estimated;
+                    status.textContent = `✓ Taxa ${rate.toFixed(4)} · EUR estimado: €${estimated} (spread PayPal 2.83%)`;
+                } else {
+                    status.textContent = `✓ Taxa encontrada: ${rate.toFixed(4)}`;
+                }
+            } else {
+                status.textContent = '⚠️ Não foi possível buscar a taxa. Introduz o EUR manualmente.';
+            }
+        });
+
+        document.getElementById('da-p-save').addEventListener('click', () => {
+            const dateVal = document.getElementById('da-p-date').value;
+            const usdVal = parseFloat(document.getElementById('da-p-usd').value) || 0;
+            const eurVal = parseFloat(document.getElementById('da-p-eur').value) || 0;
+            const status = document.getElementById('da-p-status');
+            if (!dateVal || usdVal <= 0 || eurVal <= 0) { status.textContent = '⚠️ Preenche todos os campos.'; return; }
+            const rate = parseFloat((eurVal / usdVal).toFixed(4));
+            const existing = getPayments();
+            existing.push({ date: dateVal, usd: usdVal, eur: eurVal, rate, manual: true });
+            existing.sort((a,b) => a.date.localeCompare(b.date));
+            savePayments(existing);
+            render(cachedDays);
+        });
     }
 
-    // ── Init ───────────────────────────────────────────────────────────────────
     async function init() {
         render([], true);
         openModal();
+        initPayments();
         if (!eurRate) await fetchEurRate();
-
-        // Navega para payments se necessário
-        if (!location.href.includes('/workers/payments')) {
-            window.location.href = 'https://app.dataannotation.tech/workers/payments';
-            return;
-        }
 
         const fundsTab = document.querySelector('a[href*="funds-history-tab"]');
         if (fundsTab) { fundsTab.click(); await sleep(800); }
 
         clickIncludePaid();
+        await sleep(800);
+        await setPerPage500();
         await sleep(1500);
 
         waitForRows(async () => {
@@ -411,7 +524,6 @@
         });
     }
 
-    // Injeta botão — nunca corre init automaticamente
     setTimeout(() => injectNavButton(), 2500);
 
 })();
