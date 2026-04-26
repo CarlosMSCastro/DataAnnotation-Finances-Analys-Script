@@ -2,6 +2,10 @@
 
 A Tampermonkey userscript that injects an analytics button into the DataAnnotation payments page, providing a full financial dashboard with historical tracking, monthly breakdowns, and payout analysis.
 
+## Screenshot
+
+![DA Analytics Dashboard](screenshot.png)
+
 ## Features
 
 Click the 📊 Analytics button in the navbar to open the dashboard.
@@ -134,6 +138,4 @@ Projects are normalized and grouped automatically:
 
 ---
 
-## Screenshot
 
-![DA Analytics Dashboard](screenshot.jpg)
