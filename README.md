@@ -1,47 +1,139 @@
 # DataAnnotation Analytics Dashboard
 
-A Tampermonkey userscript that injects an analytics button into the DataAnnotation payments page, giving you financial stats the platform doesn't show.
+A Tampermonkey userscript that injects an analytics button into the DataAnnotation payments page, providing a full financial dashboard with historical tracking, monthly breakdowns, and payout analysis.
 
 ## Features
 
-Click the 📊 Analytics button in the navbar to open the dashboard. The script automatically navigates to Funds History, enables "Include paid", and expands all entries before parsing.
+Click the 📊 Analytics button in the navbar to open the dashboard.
 
-The dashboard shows:
+The script automatically:
+- Navigates to **Funds History**
+- Enables **"Include paid"**
+- Sets pagination to **500 rows**
+- Expands all days and projects
+- Parses and merges data (DOM + remote + fallback)
 
-**Global totals**
+---
+
+## Dashboard Overview
+
+### **Global totals**
 - Total historical earnings
-- Paid out to PayPal
+- Paid out by DataAnnotation
+- Received in Wise (EUR tracking)
 - Available to withdraw (Transferrable)
 - Pending approval
+- Estimated next withdrawal in EUR (live rate + PayPal spread)
 
-**Per month (with month selector)**
+---
+
+### **Monthly view (with selector)**
+
+Each month includes:
+
 - Total earnings
-- Days worked vs days missed
-- Hours logged and hourly rate
+- Days worked vs total days
+- Total hours logged
+- Effective hourly rate
 - Best earning day
-- Projects breakdown with tasks, hours, and hourly rate per project
 
-**Other**
-- USD/EUR toggle with live exchange rate
-- Collapse button to fold everything back in the page
+#### **Heatmap**
+- Visual calendar of daily earnings
+- Color intensity based on revenue
+- Hover shows:
+  - Earnings
+  - Time worked
+- Highlights current day
+
+#### **Projects breakdown**
+- Top 3 projects shown by default
+- Expandable full list
+- Per project:
+  - Total earned
+  - Number of tasks
+  - Time logged
+  - Hourly rate
+
+---
+
+### **Payments tracking (PayPal → Wise)**
+
+- Manual + automatic payment tracking
+- Stores:
+  - Date
+  - USD (DataAnnotation)
+  - EUR received (Wise)
+  - Exchange rate
+- Auto-fetch historical FX rate per date
+- Applies PayPal spread (~2.83%) for estimation
+- Edit / delete entries
+- Synced locally + remote backup
+
+---
+
+### **Other features**
+
+- Live USD → EUR exchange rate (Frankfurter API)
+- Remote data persistence (backup of parsed days + payments)
+- Fallback data support (ensures no empty states)
+- Collapse button (restores page to original state)
+- Fast re-open (cached data)
+
+---
 
 ## Installation
 
-1. Install the [Tampermonkey](https://www.tampermonkey.net/) browser extension
+1. Install the [Tampermonkey](https://www.tampermonkey.net/) extension
 2. Click **Create new script**
-3. Delete the default content and paste the contents of `da-analytics.user.js`
-4. Save with `Ctrl+S`
-5. Go to `https://app.dataannotation.tech/workers/payments`
-6. Click **📊 Analytics** in the navbar
+3. Replace the default code with `da-analytics.user.js`
+4. Save (`Ctrl+S`)
+5. Open:  
+   `https://app.dataannotation.tech/workers/payments`
+6. Click **📊 Analytics**
 
-The script only runs on the payments page and never interferes with tasks or other areas of the site.
+---
 
+## Data Handling
+
+The script combines multiple sources:
+
+- **DOM data** (live from DataAnnotation)
+- **Remote storage** (persistent history)
+- **Fallback data** (safety layer)
+
+This ensures:
+- No data loss between sessions
+- Historical continuity
+- Faster loading after first run
+
+---
+
+## Project Grouping Logic
+
+Projects are normalized and grouped automatically:
+
+- Core projects:  
+  `Kernel`, `Achilles`, `Styx`, `Thalia`, `Metis`, `Andesite`, `Pegasus`, `Argon`
+
+- Everything matching:
+  - Surveys
+  - Qualifications
+  - Training
+  - Onboarding  
+
+→ grouped under **"DataAnnotation Survey"**
+
+---
+
+## Limitations
+
+- Hourly rate requires time entries  
+  (e.g. *Rate & Review* may show no rate)
+- Depends on current DOM structure of DataAnnotation
+- PayPal spread is estimated (not exact)
+
+---
+
+## Screenshot
 
 ![DA Analytics Dashboard](screenshot.jpg)
-
-
-## Notes
-
-Projects are grouped by name — Kernel, Achilles, Styx, Thalia, Metis, Andesite, Pegasus, Argon all aggregate automatically. Surveys, qualifications, training tasks, and onboarding are grouped under "DataAnnotation Survey".
-
-The hourly rate only counts logged time entries. Projects like Rate & Review that don't log time will show no hourly rate.
