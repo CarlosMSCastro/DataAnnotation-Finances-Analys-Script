@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DataAnnotation - Analytics Dashboard
 // @namespace    http://tampermonkey.net/
-// @version      5.1
+// @version      6.1
 // @description  Dashboard de analytics financeiro para DataAnnotation
 // @match        https://app.dataannotation.tech/workers/payments*
 // @grant        GM_setValue
@@ -9,8 +9,7 @@
 // @grant        GM_xmlhttpRequest
 // @connect      api.frankfurter.app
 // @connect      frankfurter.app
-// @connect      frankfurter.dev
-// @connect      api.frankfurter.dev
+// @connect      daanalysisdump.free.nf
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -18,16 +17,25 @@
     'use strict';
 
     const BLUE = '#005dcc';
+    const API_URL = 'https://daanalysisdump.free.nf/data.php';
+    const AUTH_TOKEN = '2CH3aj';
+
     let eurRate = null;
     let selectedMonth = null;
     let cachedDays = [];
+    let remoteData = {};
 
-    function getPayments() {
-        try { return JSON.parse(GM_getValue('payments', '[]')); } catch(e) { return []; }
-    }
-    function savePayments(payments) {
-        GM_setValue('payments', JSON.stringify(payments));
-    }
+    // ── Dados históricos hardcoded (não aparecem no DOM) ───────────────────────
+    const FALLBACK_DAYS = [
+        {
+            dateStr: 'Mar 26',
+            date: '2026-03-26',
+            total: 5.00,
+            projects: {
+                'DataAnnotation Survey': { total: 5.00, tasks: 1, minutes: 0, paid: true }
+            }
+        }
+    ];
 
     const KNOWN_PAYMENTS = [
         { date: '2026-04-01', usd: 15.00,   eur: 12.58,  rate: 0.8387, manual: true },
@@ -38,22 +46,68 @@
         { date: '2026-04-18', usd: 361.79,  eur: 297.63, rate: 0.8227, manual: true },
     ];
 
+    // ── Remote storage ─────────────────────────────────────────────────────────
+    function remoteGet() {
+        return new Promise((resolve) => {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: API_URL,
+                headers: { 'Accept': 'application/json' },
+                onload: (res) => {
+                    try { resolve(JSON.parse(res.responseText)); }
+                    catch(e) { resolve({}); }
+                },
+                onerror: () => resolve({}),
+                ontimeout: () => resolve({})
+            });
+        });
+    }
+
+    function remoteSet(data) {
+        return new Promise((resolve) => {
+            GM_xmlhttpRequest({
+                method: 'POST',
+                url: API_URL,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Auth-Token': AUTH_TOKEN
+                },
+                data: JSON.stringify(data),
+                onload: () => resolve(true),
+                onerror: () => resolve(false),
+                ontimeout: () => resolve(false)
+            });
+        });
+    }
+
+    // ── Local payments storage ─────────────────────────────────────────────────
+    function getPayments() {
+        if (remoteData.payments && remoteData.payments.length > 0) return remoteData.payments;
+        try { return JSON.parse(GM_getValue('payments', '[]')); } catch(e) { return []; }
+    }
+
+    function savePayments(payments) {
+        remoteData.payments = payments;
+        GM_setValue('payments', JSON.stringify(payments));
+        remoteSet(remoteData);
+    }
+
     function initPayments() {
         const existing = getPayments();
-        if (existing.length === 0) {
-            savePayments(KNOWN_PAYMENTS);
-        } else {
-            let changed = false;
-            for (const kp of KNOWN_PAYMENTS) {
-                if (!existing.find(p => p.date === kp.date && p.usd === kp.usd)) {
-                    existing.push(kp);
-                    changed = true;
-                }
+        let changed = false;
+        for (const kp of KNOWN_PAYMENTS) {
+            if (!existing.find(p => p.date === kp.date && p.usd === kp.usd)) {
+                existing.push(kp);
+                changed = true;
             }
-            if (changed) savePayments(existing.sort((a,b) => a.date.localeCompare(b.date)));
+        }
+        if (changed || existing.length === 0) {
+            existing.sort((a,b) => a.date.localeCompare(b.date));
+            savePayments(existing);
         }
     }
 
+    // ── Taxa EUR ───────────────────────────────────────────────────────────────
     function fetchEurRate() {
         return new Promise((resolve) => {
             GM_xmlhttpRequest({
@@ -132,6 +186,7 @@
         statusEl.textContent = '⏳ A calcular...';
     }
 
+    // ── Parser ─────────────────────────────────────────────────────────────────
     function parseData() {
         const dateRegex = /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d+$/;
         const monthMap = { Jan:0,Feb:1,Mar:2,Apr:3,May:4,Jun:5,Jul:6,Aug:7,Sep:8,Oct:9,Nov:10,Dec:11 };
@@ -152,7 +207,9 @@
 
             if (level === 0 && dateRegex.test(titleText)) {
                 const parts = titleText.split(' ');
-                currentDay = { date: new Date(year, monthMap[parts[0]], parseInt(parts[1])), dateStr: titleText, total: amount, projects: {} };
+                const dateObj = new Date(year, monthMap[parts[0]], parseInt(parts[1]));
+                const dateISO = `${year}-${String(dateObj.getMonth()+1).padStart(2,'0')}-${String(dateObj.getDate()).padStart(2,'0')}`;
+                currentDay = { date: dateObj, dateStr: titleText, dateISO, total: amount, projects: {} };
                 currentProj = null;
                 days.push(currentDay);
             } else if (level === 1 && currentDay && titleText !== 'Task Submission' && titleText !== 'Time Entry') {
@@ -176,8 +233,53 @@
         return days;
     }
 
+    // ── Merge DOM + remote + fallback ──────────────────────────────────────────
+    function mergeDays(domDays) {
+        const remoteDays = remoteData.days || [];
+        const merged = [...domDays];
+        const domDates = new Set(domDays.map(d => d.dateISO));
+
+        for (const rd of remoteDays) {
+            if (!domDates.has(rd.dateISO)) {
+                merged.push({
+                    date: new Date(rd.dateISO),
+                    dateStr: rd.dateStr,
+                    dateISO: rd.dateISO,
+                    total: rd.total,
+                    projects: rd.projects || {}
+                });
+            }
+        }
+
+        for (const fb of FALLBACK_DAYS) {
+            if (!domDates.has(fb.date) && !remoteDays.find(r => r.dateISO === fb.date)) {
+                merged.push({
+                    date: new Date(fb.date),
+                    dateStr: fb.dateStr,
+                    dateISO: fb.date,
+                    total: fb.total,
+                    projects: fb.projects
+                });
+            }
+        }
+
+        merged.sort((a, b) => b.date - a.date);
+        return merged;
+    }
+
+    // ── Guarda no remote ───────────────────────────────────────────────────────
+    function persistDays(days) {
+        remoteData.days = days.map(d => ({
+            dateISO: d.dateISO,
+            dateStr: d.dateStr,
+            total: d.total,
+            projects: d.projects
+        }));
+        remoteSet(remoteData);
+    }
+
+    // ── Stats ──────────────────────────────────────────────────────────────────
     function calcGlobal(days) {
-        // lê total histórico diretamente do DOM (mais preciso que somar headers)
         let grandTotal = 0;
         const totalEl = Array.from(document.querySelectorAll('div.tw-text-4xl'))
             .find(el => el.textContent.includes('$'));
@@ -230,6 +332,7 @@
         return result;
     }
 
+    // ── projKey ────────────────────────────────────────────────────────────────
     const KNOWN_PROJECTS = ['Kernel', 'Achilles', 'Styx', 'Thalia', 'Metis', 'Andesite', 'Pegasus', 'Argon'];
     const SURVEY_REGEX = /^\[Survey\]|^\[SURVEY\]|^\[QUALIFICATION\]|^\[Qualification\]|^\[TRAINING\]|^\[💰 PAID TRAINING\]|^Onboarding|^Additional Projects|^Write LONG/i;
 
@@ -250,6 +353,7 @@
         return t.replace(/\s*[:]\s*$/, '').trim() || title;
     }
 
+    // ── Formatters ─────────────────────────────────────────────────────────────
     function fmt(v) { return '$' + v.toFixed(2); }
     function fmtH(m) {
         if (!m) return '—';
@@ -266,22 +370,45 @@
     function openModal() { const m = document.getElementById('da-modal'); if (m) m.style.display = 'flex'; }
     function closeModal() { const m = document.getElementById('da-modal'); if (m) m.style.display = 'none'; }
 
-    function injectNavButton(tries = 0) {
+    function injectNavButton() {
         if (document.getElementById('da-nav-btn')) return;
-        const navList = document.querySelector('.navbar-collapse ul.navbar-nav');
-        if (!navList || navList.children.length === 0) {
-            if (tries < 30) setTimeout(() => injectNavButton(tries + 1), 300);
-            return;
-        }
+
+        const nav = document.querySelector('ul.nav.navbar-nav.mr-auto');
+        if (!nav) return;
+
         const li = document.createElement('li');
-        li.innerHTML = `<a id="da-nav-btn" style="color:#fff;font-weight:600;font-size:14px;
-            padding:8px 16px;display:block;text-decoration:none;opacity:0.9;white-space:nowrap;cursor:pointer;">
+
+        li.innerHTML = `
+        <a id="da-nav-btn" class="nav-link" style="
+            color:#fff;
+            font-weight:600;
+            font-size:14px;
+            padding:8px 16px;
+            display:block;
+            cursor:pointer;
+        ">
             📊 Analytics
-        </a>`;
-        navList.appendChild(li);
-        document.getElementById('da-nav-btn').addEventListener('click', init);
+        </a>
+    `;
+
+        nav.appendChild(li);
+
+        document.getElementById('da-nav-btn').onclick = init;
     }
 
+    // OBSERVER → isto é o que faltava
+    const observer = new MutationObserver(() => {
+        injectNavButton();
+    });
+
+    observer.observe(document.body, {
+        childList: true,
+        subtree: true
+    });
+
+    // primeira tentativa
+    injectNavButton();
+    // ── Render ─────────────────────────────────────────────────────────────────
     function render(days, loading = false) {
         cachedDays = days;
         const old = document.getElementById('da-modal');
@@ -291,7 +418,7 @@
         const months = getMonths(days);
         if (!selectedMonth && months.length > 0) selectedMonth = months[0].key;
         const payments = getPayments().sort((a,b) => b.date.localeCompare(a.date));
-        const totalEurWise = payments.reduce((s, p) => s + p.eur, 0);
+        const totalEurWise = payments.filter(p => p.eur > 0).reduce((s, p) => s + p.eur, 0);
 
         function row(label, value, vstyle='color:#111827') {
             return `<div style="display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px solid #f3f4f6;">
@@ -318,11 +445,102 @@
         if (selectedMonth && !loading) {
             const [y, mo] = selectedMonth.split('-').map(Number);
             const ms = calcMonth(days, y, mo);
+
+            // ── Heatmap ──────────────────────────────────────────────────────
+            const daysInMonth = new Date(y, mo + 1, 0).getDate();
+            const firstDow = new Date(y, mo, 1).getDay();
+            const filteredDays = days.filter(d => d.date.getFullYear() === y && d.date.getMonth() === mo);
+            const dayMap = {};
+            for (const d of filteredDays) dayMap[d.date.getDate()] = d;
+            const maxVal = Math.max(...filteredDays.map(d => d.total), 1);
+
+            function heatColor(val) {
+                if (!val || val === 0) return '#d1d5db';
+                const pct = val / maxVal;
+                if (pct < 0.25) return '#93c5fd';
+                if (pct < 0.5)  return '#3b82f6';
+                if (pct < 0.75) return '#1d4ed8';
+                return '#1e3a8a';
+            }
+
+            function textColor(val) {
+                if (!val || val === 0) return '#6b7280';
+                const pct = val / maxVal;
+                return pct < 0.25 ? '#1e40af' : '#fff';
+            }
+
+            const dowLabels = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
+            const dowHeader = dowLabels.map(l => `<div style="font-size:9px;color:#9ca3af;text-align:center;font-weight:600;padding-bottom:2px;">${l}</div>`).join('');
+
+            const today = new Date();
+            const todayDay = (today.getFullYear() === y && today.getMonth() === mo) ? today.getDate() : -1;
+
+            let cells = '';
+            for (let i = 0; i < firstDow; i++) {
+                cells += `<div style="aspect-ratio:1;"></div>`;
+            }
+            for (let d = 1; d <= daysInMonth; d++) {
+                const isFuture = (y > today.getFullYear()) ||
+                    (y === today.getFullYear() && mo > today.getMonth()) ||
+                    (y === today.getFullYear() && mo === today.getMonth() && d > today.getDate());
+                const isToday = d === todayDay;
+                const dayData = dayMap[d];
+                const val = isFuture ? null : (dayData?.total || 0);
+                const mins = Object.values(dayData?.projects || {}).reduce((s,p) => s + (p.minutes||0), 0);
+                const tooltipText = isFuture ? 'Dia futuro' : (val > 0
+                    ? `$${val.toFixed(2)}${mins > 0 ? ' · ' + Math.floor(mins/60) + 'h ' + (mins%60) + 'm' : ''}`
+                    : 'Sem atividade');
+                const bg = isFuture ? '#f3f4f6' : heatColor(val);
+                const tc = isFuture ? '#d1d5db' : textColor(val);
+                const border = isToday ? `box-shadow:0 0 0 2px #f59e0b;` : '';
+                cells += `<div class="da-heat-cell" data-tip="${tooltipText}" style="
+                    background:${bg};border-radius:4px;
+                    display:flex;align-items:center;justify-content:center;
+                    aspect-ratio:1;cursor:default;position:relative;
+                    font-size:10px;font-weight:${isToday ? '800' : '600'};color:${tc};
+                    transition:transform 0.08s;${border}
+                ">${d}</div>`;
+            }
+
+            const heatmap = `
+                <style>
+                    .da-heat-cell:hover { transform: scale(1.25); z-index: 2; }
+                    .da-heat-cell:hover::after {
+                        content: attr(data-tip);
+                        position: absolute;
+                        bottom: calc(100% + 4px);
+                        left: 50%;
+                        transform: translateX(-50%);
+                        background: #111827;
+                        color: #fff;
+                        font-size: 11px;
+                        padding: 3px 7px;
+                        border-radius: 4px;
+                        white-space: nowrap;
+                        pointer-events: none;
+                        z-index: 999;
+                    }
+                </style>
+                <div style="margin:12px 0 8px;">
+                    <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:3px;margin-bottom:3px;">${dowHeader}</div>
+                    <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:3px;">${cells}</div>
+                    <div style="display:flex;gap:4px;align-items:center;margin-top:8px;justify-content:flex-end;">
+                        <span style="font-size:10px;color:#9ca3af;">Futuro</span>
+                        <div style="width:12px;height:12px;background:#f3f4f6;border-radius:2px;"></div>
+                        <span style="font-size:10px;color:#9ca3af;margin-left:4px;">Sem ativ.</span>
+                        ${['#d1d5db','#93c5fd','#3b82f6','#1d4ed8','#1e3a8a'].map(c => `<div style="width:12px;height:12px;background:${c};border-radius:2px;"></div>`).join('')}
+                        <span style="font-size:10px;color:#9ca3af;">Mais</span>
+                        <div style="width:12px;height:12px;background:#fff;border-radius:2px;box-shadow:0 0 0 2px #f59e0b;margin-left:4px;"></div>
+                        <span style="font-size:10px;color:#9ca3af;">Hoje</span>
+                    </div>
+                </div>`;
+
+            // ── Projetos: top 3 + expandir ────────────────────────────────────
             const topProj = Object.entries(ms.projects)
                 .filter(([,d]) => d.total > 0)
-                .sort((a,b) => b[1].total - a[1].total)
-                .slice(0, 15);
-            const projRows = topProj.map(([name, d]) => {
+                .sort((a,b) => b[1].total - a[1].total);
+
+            function projRow(name, d) {
                 const safe = name.replace(/"/g, '&quot;').replace(/</g, '&lt;');
                 return `<div style="display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px solid #f3f4f6;">
                     <div style="flex:1;min-width:0;">
@@ -333,28 +551,41 @@
                     </div>
                     <span style="color:${BLUE};font-weight:700;font-size:14px;margin-left:16px;">${fmt(d.total)}</span>
                 </div>`;
-            }).join('');
+            }
+
+            const top3 = topProj.slice(0, 3).map(([n,d]) => projRow(n,d)).join('');
+            const rest = topProj.slice(3).map(([n,d]) => projRow(n,d)).join('');
+            const moreBtn = topProj.length > 3 ? `
+                <div id="da-proj-more" style="display:none;">${rest}</div>
+                <button id="da-proj-toggle" data-count="${topProj.length - 3}" style="width:100%;margin-top:8px;background:#f3f4f6;color:#374151;border:none;
+                    border-radius:6px;padding:6px;font-size:13px;cursor:pointer;">
+                    + ${topProj.length - 3} mais projetos
+                </button>` : '';
+
+            const projContent = topProj.length > 0 ? `${section('Por projeto')}${top3}${moreBtn}` : '';
 
             monthContent = `
                 ${section(MONTH_NAMES[mo])}
+                ${heatmap}
                 ${row('Total', '$' + ms.total.toFixed(2), `color:${BLUE};font-size:20px;font-weight:800;`)}
                 ${row('Dias trabalhados', `${ms.workedDays} / ${ms.days}`)}
                 ${row('Horas registadas', fmtH(ms.minutes))}
                 ${row('$/hora', fmtRate(ms.total, ms.minutes))}
                 ${ms.bestDay ? row('Melhor dia', `${ms.bestDay} ($${ms.bestAmount.toFixed(2)})`, 'color:#d97706') : ''}
-                ${topProj.length > 0 ? `${section('Por projeto')}${projRows}` : ''}
+                ${projContent}
             `;
         } else if (loading) {
             monthContent = `<div id="da-status" style="color:${BLUE};text-align:center;padding:30px 0;font-size:14px;">⏳ A carregar dados...</div>`;
         }
 
-        const paymentsRows = payments.map(p => `
-            <div style="display:grid;grid-template-columns:90px 70px 70px 70px 1fr;gap:4px;padding:7px 0;border-bottom:1px solid #f3f4f6;font-size:13px;align-items:center;">
+        const paymentsRows = payments.map((p, i) => `
+            <div style="display:grid;grid-template-columns:90px 70px 70px 70px 1fr 24px;gap:4px;padding:7px 0;border-bottom:1px solid #f3f4f6;font-size:13px;align-items:center;">
                 <span style="color:#6b7280;">${p.date}</span>
                 <span style="color:#111827;font-weight:600;">$${p.usd.toFixed(2)}</span>
-                <span style="color:#16a34a;font-weight:600;">€${p.eur.toFixed(2)}</span>
-                <span style="color:#9ca3af;">${p.rate.toFixed(4)}</span>
-                <span style="color:${p.manual ? '#d97706' : '#2563eb'};font-size:11px;">${p.manual ? '✏️ manual' : '🤖 auto'}</span>
+                <span style="color:${p.eur > 0 ? '#16a34a' : '#9ca3af'};font-weight:600;">${p.eur > 0 ? '€' + p.eur.toFixed(2) : '—'}</span>
+                <span style="color:#9ca3af;">${p.rate > 0 ? p.rate.toFixed(4) : '—'}</span>
+                <span style="color:${p.manual ? '#d97706' : '#2563eb'};font-size:11px;">${p.manual ? '✏️' : '🤖'}</span>
+                <button data-del-idx="${i}" style="background:none;border:none;color:#ef4444;cursor:pointer;font-size:14px;padding:0;line-height:1;">✕</button>
             </div>`).join('');
 
         const addPaymentForm = `
@@ -411,12 +642,15 @@
                     </div>
                     <div id="da-month-content">${monthContent}</div>
 
-                    ${section('Pagamentos PayPal → Wise', '<button id="da-add-btn" style="background:' + BLUE + ';color:#fff;border:none;border-radius:4px;padding:2px 8px;font-size:11px;cursor:pointer;text-transform:none;letter-spacing:0;">+ Registar</button>')}
-                    <div style="display:grid;grid-template-columns:90px 70px 70px 70px 1fr;gap:4px;padding:5px 0;font-size:11px;color:#9ca3af;font-weight:600;">
-                        <span>Data</span><span>USD</span><span>EUR Wise</span><span>Taxa</span><span></span>
+                    ${section('Pagamentos PayPal → Wise', '<button id="da-pay-toggle" style="background:' + BLUE + ';color:#fff;border:none;border-radius:4px;padding:2px 10px;font-size:11px;cursor:pointer;">Verificar pagamentos</button>')}
+                    <div id="da-pay-section" style="display:none;">
+                    <div style="display:grid;grid-template-columns:90px 70px 70px 70px 1fr 24px;gap:4px;padding:5px 0;font-size:11px;color:#9ca3af;font-weight:600;">
+                        <span>Data</span><span>USD</span><span>EUR Wise</span><span>Taxa</span><span></span><span></span>
                     </div>
                     ${paymentsRows}
+                    <button id="da-add-btn" style="margin-top:8px;background:#f3f4f6;color:#374151;border:none;border-radius:6px;padding:5px 12px;font-size:13px;cursor:pointer;">+ Registar pagamento</button>
                     ${addPaymentForm}
+                    </div>
 
                     <div style="color:#d1d5db;font-size:11px;text-align:right;margin-top:16px;">
                         ${eurRate ? `taxa live: 1 USD = €${eurRate.toFixed(4)} · ` : ''}Atualizado: ${new Date().toLocaleTimeString('pt-PT')}
@@ -428,6 +662,34 @@
 
         modal.addEventListener('click', (e) => { if (e.target === modal) closeModal(); });
         document.getElementById('da-close').addEventListener('click', closeModal);
+
+        document.getElementById('da-pay-toggle').addEventListener('click', () => {
+            const sec = document.getElementById('da-pay-section');
+            sec.style.display = sec.style.display === 'none' ? 'block' : 'none';
+        });
+
+        const projToggle = document.getElementById('da-proj-toggle');
+        if (projToggle) {
+            projToggle.addEventListener('click', () => {
+                const more = document.getElementById('da-proj-more');
+                const visible = more.style.display !== 'none';
+                more.style.display = visible ? 'none' : 'block';
+                projToggle.textContent = visible
+                    ? `+ ${projToggle.dataset.count} mais projetos`
+                    : 'Ver menos';
+            });
+        }
+
+        modal.addEventListener('click', (e) => {
+            const btn = e.target.closest('button[data-del-idx]');
+            if (!btn) return;
+            const idx = parseInt(btn.dataset.delIdx);
+            const existing = getPayments().sort((a,b) => b.date.localeCompare(a.date));
+            existing.splice(idx, 1);
+            existing.sort((a,b) => a.date.localeCompare(b.date));
+            savePayments(existing);
+            render(cachedDays);
+        });
 
         document.getElementById('da-collapse').addEventListener('click', async (e) => {
             const btn = e.currentTarget;
@@ -502,9 +764,15 @@
         });
     }
 
+    // ── Init ───────────────────────────────────────────────────────────────────
     async function init() {
         render([], true);
         openModal();
+
+        const status = document.getElementById('da-status');
+        if (status) status.textContent = '⏳ A carregar histórico...';
+        remoteData = await remoteGet();
+
         initPayments();
         if (!eurRate) await fetchEurRate();
 
@@ -519,8 +787,10 @@
         waitForRows(async () => {
             const statusEl = document.getElementById('da-status') || { textContent: '' };
             await expandAll(statusEl);
-            const days = parseData();
-            render(days);
+            const domDays = parseData();
+            const mergedDays = mergeDays(domDays);
+            persistDays(mergedDays);
+            render(mergedDays);
         });
     }
 
